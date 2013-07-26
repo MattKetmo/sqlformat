@@ -1,0 +1,9 @@
+{
+    "chmod": "0755",
+    "directories": [
+        "vendor"
+    ],
+    "main": "sqlformat.php",
+    "output": "sqlformat.phar",
+    "stub": true
+}
