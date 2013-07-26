@@ -3,11 +3,6 @@
 
 require __DIR__.'/vendor/autoload.php';
 
-use Symfony\Component\Console\Input\ArgvInput;
-use Symfony\Component\Console\Input\InputDefinition;
-use Symfony\Component\Console\Input\InputArgument;
-use Symfony\Component\Console\Input\InputOption;
-
 $basename = $argv[0];
 
 $doc = <<<DOC
