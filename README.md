@@ -27,7 +27,7 @@ but with more options.
 
 # Examples
 
-    $ echo "SELECT name FROM users WHERE id > 10" | sqlformat
+    $ sqlformat "SELECT name FROM users WHERE id > 10"
     SELECT
       name
     FROM
