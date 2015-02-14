@@ -9,7 +9,7 @@
  * @copyright  2013 Jeremy Dorn
  * @license    http://opensource.org/licenses/MIT
  * @link       http://github.com/jdorn/sql-formatter
- * @version    1.2.11
+ * @version    1.2.18
  */
 class SqlFormatter
 {
@@ -26,6 +26,7 @@ class SqlFormatter
     const TOKEN_TYPE_BLOCK_COMMENT = 9;
     const TOKEN_TYPE_NUMBER = 10;
     const TOKEN_TYPE_ERROR = 11;
+    const TOKEN_TYPE_VARIABLE = 12;
 
     // Constants for different components of a token
     const TOKEN_TYPE = 0;
@@ -38,8 +39,8 @@ class SqlFormatter
         'CHARSET', 'CHECK', 'CHECKSUM', 'COLLATE', 'COLLATION', 'COLUMN', 'COLUMNS', 'COMMENT', 'COMMIT', 'COMMITTED', 'COMPRESSED', 'CONCURRENT',
         'CONSTRAINT', 'CONTAINS', 'CONVERT', 'CREATE', 'CROSS', 'CURRENT_TIMESTAMP', 'DATABASE', 'DATABASES', 'DAY', 'DAY_HOUR', 'DAY_MINUTE',
         'DAY_SECOND', 'DEFAULT', 'DEFINER', 'DELAYED', 'DELETE', 'DESC', 'DESCRIBE', 'DETERMINISTIC', 'DISTINCT', 'DISTINCTROW', 'DIV',
-        'DO', 'DUMPFILE', 'DUPLICATE', 'DYNAMIC', 'ELSE', 'ENCLOSED', 'END', 'ENGINE', 'ENGINE_TYPE', 'ENGINES', 'ESCAPE', 'ESCAPED', 'EVENTS', 'EXECUTE',
-        'EXISTS', 'EXPLAIN', 'EXTENDED', 'FAST', 'FIELDS', 'FILE', 'FIRST', 'FIXED', 'FLUSH', 'FOR', 'FORCE', 'FOREIGN', 'FULL', 'FULLTEXT',
+        'DO', 'DUMPFILE', 'DUPLICATE', 'DYNAMIC', 'ELSE', 'ENCLOSED', 'END', 'ENGINE', 'ENGINE_TYPE', 'ENGINES', 'ESCAPE', 'ESCAPED', 'EVENTS', 'EXEC',
+        'EXECUTE', 'EXISTS', 'EXPLAIN', 'EXTENDED', 'FAST', 'FIELDS', 'FILE', 'FIRST', 'FIXED', 'FLUSH', 'FOR', 'FORCE', 'FOREIGN', 'FULL', 'FULLTEXT',
         'FUNCTION', 'GLOBAL', 'GRANT', 'GRANTS', 'GROUP_CONCAT', 'HEAP', 'HIGH_PRIORITY', 'HOSTS', 'HOUR', 'HOUR_MINUTE',
         'HOUR_SECOND', 'IDENTIFIED', 'IF', 'IFNULL', 'IGNORE', 'IN', 'INDEX', 'INDEXES', 'INFILE', 'INSERT', 'INSERT_ID', 'INSERT_METHOD', 'INTERVAL',
         'INTO', 'INVOKER', 'IS', 'ISOLATION', 'KEY', 'KEYS', 'KILL', 'LAST_INSERT_ID', 'LEADING', 'LEVEL', 'LIKE', 'LINEAR',
@@ -101,7 +102,7 @@ class SqlFormatter
     );
 
     // Punctuation that can be used as a boundary between other tokens
-    protected static $boundaries = array(',', ';', ')', '(', '.', '=', '<', '>', '+', '-', '*', '/', '!', '^', '%', '|', '&', '#');
+    protected static $boundaries = array(',', ';',':', ')', '(', '.', '=', '<', '>', '+', '-', '*', '/', '!', '^', '%', '|', '&', '#');
 
     // For HTML syntax highlighting
     // Styles applied to different token types
@@ -113,6 +114,7 @@ class SqlFormatter
     public static $word_attributes = 'style="color: #333;"';
     public static $error_attributes = 'style="background-color: red;"';
     public static $comment_attributes = 'style="color: #aaa;"';
+    public static $variable_attributes = 'style="color: orange;"';
     public static $pre_attributes = 'style="color: black; background-color: white;"';
 
     // Boolean - whether or not the current environment is the CLI
@@ -130,6 +132,7 @@ class SqlFormatter
     public static $cli_error = "\x1b[31;1;7m";
     public static $cli_comment = "\x1b[30;1m";
     public static $cli_functions = "\x1b[37m";
+    public static $cli_variable = "\x1b[36;1m";
 
     // The tab character to use when formatting SQL
     public static $tab = '  ';
@@ -173,18 +176,20 @@ class SqlFormatter
      */
     protected static function init()
     {
-        if(self::$init) return;
+        if (self::$init) return;
 
-        // Sort reserved word list from longest word to shortest
-        usort(self::$reserved, array('SqlFormatter', 'sortLength'));
+        // Sort reserved word list from longest word to shortest, 3x faster than usort
+        $reservedMap = array_combine(self::$reserved, array_map('strlen', self::$reserved));
+        arsort($reservedMap);
+        self::$reserved = array_keys($reservedMap);
 
         // Set up regular expressions
-        self::$regex_boundaries = '('.implode('|',array_map(array('SqlFormatter', 'quote_regex'),self::$boundaries)).')';
-        self::$regex_reserved = '('.implode('|',array_map(array('SqlFormatter', 'quote_regex'),self::$reserved)).')';
-        self::$regex_reserved_toplevel = str_replace(' ','\\s+','('.implode('|',array_map(array('SqlFormatter', 'quote_regex'),self::$reserved_toplevel)).')');
-        self::$regex_reserved_newline = str_replace(' ','\\s+','('.implode('|',array_map(array('SqlFormatter', 'quote_regex'),self::$reserved_newline)).')');
+        self::$regex_boundaries = '('.implode('|',array_map(array(__CLASS__, 'quote_regex'),self::$boundaries)).')';
+        self::$regex_reserved = '('.implode('|',array_map(array(__CLASS__, 'quote_regex'),self::$reserved)).')';
+        self::$regex_reserved_toplevel = str_replace(' ','\\s+','('.implode('|',array_map(array(__CLASS__, 'quote_regex'),self::$reserved_toplevel)).')');
+        self::$regex_reserved_newline = str_replace(' ','\\s+','('.implode('|',array_map(array(__CLASS__, 'quote_regex'),self::$reserved_newline)).')');
 
-        self::$regex_function = '('.implode('|',array_map(array('SqlFormatter', 'quote_regex'),self::$functions)).')';
+        self::$regex_function = '('.implode('|',array_map(array(__CLASS__, 'quote_regex'),self::$functions)).')';
 
         self::$init = true;
     }
@@ -230,25 +235,39 @@ class SqlFormatter
         }
 
         // Quoted String
-        if ($string[0]==='"' || $string[0]==='\'' || $string[0]==='`') {
+        if ($string[0]==='"' || $string[0]==='\'' || $string[0]==='`' || $string[0]==='[') {
             $return = array(
-                self::TOKEN_TYPE => ($string[0]==='`'? self::TOKEN_TYPE_BACKTICK_QUOTE : self::TOKEN_TYPE_QUOTE),
-                self::TOKEN_VALUE => $string
+                self::TOKEN_TYPE => (($string[0]==='`' || $string[0]==='[')? self::TOKEN_TYPE_BACKTICK_QUOTE : self::TOKEN_TYPE_QUOTE),
+                self::TOKEN_VALUE => self::getQuotedString($string)
             );
-
-            // This checks for the following patterns:
-            // 1. backtick quoted string using `` to escape
-            // 2. double quoted string using "" or \" to escape
-            // 3. single quoted string using '' or \' to escape
-            if ( preg_match('/^(((`[^`]*($|`))+)|(("[^"\\\\]*(?:\\\\.[^"\\\\]*)*("|$))+)|((\'[^\'\\\\]*(?:\\\\.[^\'\\\\]*)*(\'|$))+))/s', $string, $matches)) {
-                $return[self::TOKEN_VALUE] = $matches[1];
-            }
 
             return $return;
         }
 
-        // Number
-        if (preg_match('/^([0-9]+(\.[0-9]+)?)($|\s|"\'`|'.self::$regex_boundaries.')/',$string,$matches)) {
+        // User-defined Variable
+        if ($string[0] === '@' && isset($string[1])) {
+            $ret = array(
+                self::TOKEN_VALUE => null,
+                self::TOKEN_TYPE => self::TOKEN_TYPE_VARIABLE
+            );
+
+            // If the variable name is quoted
+            if ($string[1]==='"' || $string[1]==='\'' || $string[1]==='`') {
+                $ret[self::TOKEN_VALUE] = '@'.self::getQuotedString(substr($string,1));
+            }
+            // Non-quoted variable name
+            else {
+                preg_match('/^(@[a-zA-Z0-9\._\$]+)/',$string,$matches);
+                if ($matches) {
+                    $ret[self::TOKEN_VALUE] = $matches[1];
+                }
+            }
+
+            if($ret[self::TOKEN_VALUE] !== null) return $ret;
+        }
+
+        // Number (decimal, binary, or hex)
+        if (preg_match('/^([0-9]+(\.[0-9]+)?|0x[0-9a-fA-F]+|0b[01]+)($|\s|"\'`|'.self::$regex_boundaries.')/',$string,$matches)) {
             return array(
                 self::TOKEN_VALUE => $matches[1],
                 self::TOKEN_TYPE=>self::TOKEN_TYPE_NUMBER
@@ -308,6 +327,22 @@ class SqlFormatter
             self::TOKEN_VALUE => $matches[1],
             self::TOKEN_TYPE  => self::TOKEN_TYPE_WORD
         );
+    }
+
+    protected static function getQuotedString($string)
+    {
+        $ret = null;
+
+        // This checks for the following patterns:
+        // 1. backtick quoted string using `` to escape
+        // 2. square bracket quoted string (SQL Server) using ]] to escape
+        // 3. double quoted string using "" or \" to escape
+        // 4. single quoted string using '' or \' to escape
+        if ( preg_match('/^(((`[^`]*($|`))+)|((\[[^\]]*($|\]))(\][^\]]*($|\]))*)|(("[^"\\\\]*(?:\\\\.[^"\\\\]*)*("|$))+)|((\'[^\'\\\\]*(?:\\\\.[^\'\\\\]*)*(\'|$))+))/s', $string, $matches)) {
+            $ret = $matches[1];
+        }
+
+        return $ret;
     }
 
     /**
@@ -408,6 +443,7 @@ class SqlFormatter
         $added_newline = false;
         $inline_count = 0;
         $inline_indented = false;
+        $clause_limit = false;
 
         // Tokenize String
         $original_tokens = self::tokenize($string);
@@ -500,7 +536,7 @@ class SqlFormatter
                 $length = 0;
                 for ($j=1;$j<=250;$j++) {
                     // Reached end of string
-                    if(!isset($tokens[$i+$j])) break;
+                    if (!isset($tokens[$i+$j])) break;
 
                     $next = $tokens[$i+$j];
 
@@ -576,11 +612,6 @@ class SqlFormatter
                 }
             }
 
-            // Commas start a new line (unless within inline parentheses)
-            elseif ($token[self::TOKEN_VALUE] === ',' && !$inline_parentheses) {
-                $newline = true;
-            }
-
             // Top level reserved words start a new line and increase the special indent level
             elseif ($token[self::TOKEN_TYPE] === self::TOKEN_TYPE_RESERVED_TOPLEVEL) {
                 $increase_special_indent = true;
@@ -607,6 +638,28 @@ class SqlFormatter
                 if (strpos($token[self::TOKEN_VALUE],' ')!==false || strpos($token[self::TOKEN_VALUE],"\n")!==false || strpos($token[self::TOKEN_VALUE],"\t")!==false) {
                     $highlighted = preg_replace('/\s+/',' ',$highlighted);
                 }
+                //if SQL 'LIMIT' clause, start variable to reset newline
+                if ($token[self::TOKEN_VALUE] === 'LIMIT' && !$inline_parentheses) {
+                    $clause_limit = true;
+                }
+            }
+
+            // Checks if we are out of the limit clause
+            elseif ($clause_limit && $token[self::TOKEN_VALUE] !== "," && $token[self::TOKEN_TYPE] !== self::TOKEN_TYPE_NUMBER && $token[self::TOKEN_TYPE] !== self::TOKEN_TYPE_WHITESPACE) {
+                $clause_limit = false;
+            }
+
+            // Commas start a new line (unless within inline parentheses or SQL 'LIMIT' clause)
+            elseif ($token[self::TOKEN_VALUE] === ',' && !$inline_parentheses) {
+                //If the previous TOKEN_VALUE is 'LIMIT', resets new line
+                if ($clause_limit === true) {
+                    $newline = false;
+                    $clause_limit = false;
+                }
+                // All other cases of commas
+                else {
+                    $newline = true;
+                }
             }
 
             // Newline reserved words start a new line
@@ -624,7 +677,7 @@ class SqlFormatter
 
             // Multiple boundary characters in a row should not have spaces between them (not including parentheses)
             elseif ($token[self::TOKEN_TYPE] === self::TOKEN_TYPE_BOUNDARY) {
-                if ($tokens[$i-1][self::TOKEN_TYPE] === self::TOKEN_TYPE_BOUNDARY) {
+                if (isset($tokens[$i-1]) && $tokens[$i-1][self::TOKEN_TYPE] === self::TOKEN_TYPE_BOUNDARY) {
                     if (isset($original_tokens[$token['i']-1]) && $original_tokens[$token['i']-1][self::TOKEN_TYPE] !== self::TOKEN_TYPE_WHITESPACE) {
                         $return = rtrim($return,' ');
                     }
@@ -641,6 +694,14 @@ class SqlFormatter
             // If the token shouldn't have a space after it
             if ($token[self::TOKEN_VALUE] === '(' || $token[self::TOKEN_VALUE] === '.') {
                 $return = rtrim($return,' ');
+            }
+
+            // If this is the "-" of a negative number, it shouldn't have a space after it
+            if($token[self::TOKEN_VALUE] === '-' && isset($tokens[$i+1]) && $tokens[$i+1][self::TOKEN_TYPE] === self::TOKEN_TYPE_NUMBER && isset($tokens[$i-1])) {
+                $prev = $tokens[$i-1][self::TOKEN_TYPE];
+                if($prev !== self::TOKEN_TYPE_QUOTE && $prev !== self::TOKEN_TYPE_BACKTICK_QUOTE && $prev !== self::TOKEN_TYPE_WORD && $prev !== self::TOKEN_TYPE_NUMBER) {
+                    $return = rtrim($return,' ');
+                }
             }
         }
 
@@ -766,6 +827,10 @@ class SqlFormatter
             if ($token[self::TOKEN_TYPE] === self::TOKEN_TYPE_COMMENT || $token[self::TOKEN_TYPE] === self::TOKEN_TYPE_BLOCK_COMMENT) {
                 continue;
             }
+            // Remove extra whitespace in reserved words (e.g "OUTER     JOIN" becomes "OUTER JOIN")
+            elseif ($token[self::TOKEN_TYPE] === self::TOKEN_TYPE_RESERVED || $token[self::TOKEN_TYPE] === self::TOKEN_TYPE_RESERVED_NEWLINE || $token[self::TOKEN_TYPE] === self::TOKEN_TYPE_RESERVED_TOPLEVEL) {
+                $token[self::TOKEN_VALUE] = preg_replace('/\s+/',' ',$token[self::TOKEN_VALUE]);
+            }
 
             if ($token[self::TOKEN_TYPE] === self::TOKEN_TYPE_WHITESPACE) {
                 // If the last token was whitespace, don't add another one
@@ -800,7 +865,11 @@ class SqlFormatter
         if (self::is_cli()) {
             $token = $token[self::TOKEN_VALUE];
         } else {
-            $token = htmlentities($token[self::TOKEN_VALUE],ENT_COMPAT,'UTF-8');
+            if (defined('ENT_IGNORE')) {
+              $token = htmlentities($token[self::TOKEN_VALUE],ENT_COMPAT | ENT_IGNORE ,'UTF-8');
+            } else {
+              $token = htmlentities($token[self::TOKEN_VALUE],ENT_COMPAT,'UTF-8');
+            }
         }
 
         if ($type===self::TOKEN_TYPE_BOUNDARY) {
@@ -819,6 +888,8 @@ class SqlFormatter
             return self::highlightReservedWord($token);
         } elseif ($type===self::TOKEN_TYPE_NUMBER) {
             return self::highlightNumber($token);
+        } elseif ($type===self::TOKEN_TYPE_VARIABLE) {
+            return self::highlightVariable($token);
         } elseif ($type===self::TOKEN_TYPE_COMMENT || $type===self::TOKEN_TYPE_BLOCK_COMMENT) {
             return self::highlightComment($token);
         }
@@ -883,7 +954,7 @@ class SqlFormatter
      */
     protected static function highlightBoundary($value)
     {
-        if($value==='(' || $value===')') return $value;
+        if ($value==='(' || $value===')') return $value;
 
         if (self::is_cli()) {
             return self::$cli_boundary . $value . "\x1b[0m";
@@ -957,16 +1028,19 @@ class SqlFormatter
     }
 
     /**
-     * Helper function for sorting the list of reserved words by length
+     * Highlights a variable token
      *
-     * @param String $a The first string
-     * @param String $b The second string
+     * @param String $value The token's value
      *
-     * @return int The comparison of the string lengths
+     * @return String HTML code of the highlighted token.
      */
-    private static function sortLength($a, $b)
+    protected static function highlightVariable($value)
     {
-        return strlen($b) - strlen($a);
+        if (self::is_cli()) {
+            return self::$cli_variable . $value . "\x1b[0m";
+        } else {
+            return '<span ' . self::$variable_attributes . '>' . $value . '</span>';
+        }
     }
 
     /**
@@ -1004,7 +1078,7 @@ class SqlFormatter
 
     private static function is_cli()
     {
-        if(isset(self::$cli)) return self::$cli;
+        if (isset(self::$cli)) return self::$cli;
         else return php_sapi_name() === 'cli';
     }
 
