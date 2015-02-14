@@ -3,6 +3,7 @@
     "directories": [
         "vendor"
     ],
+    "git-version": "package_version",
     "main": "sqlformat.php",
     "output": "sqlformat.phar",
     "stub": true
